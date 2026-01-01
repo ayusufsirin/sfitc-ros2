@@ -4,6 +4,7 @@ import os
 import queue
 import threading
 import time
+import itertools
 from collections import deque
 from datetime import datetime
 
@@ -14,6 +15,7 @@ import rclpy
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from sensor_msgs.msg import PointCloud2
+from sensor_msgs.msg import PointField
 from sensor_msgs_py import point_cloud2 as pc2
 
 
@@ -156,13 +158,20 @@ class PointCloudTransformer(Node):
             PointCloud2, self.cumulative_origin_point_cloud, 10
         )
 
+        # Publish xyz-only clouds (do NOT reuse velodyne fields if you only output xyz bytes)
+        self.xyz_fields = [
+            PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
+            PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
+            PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
+        ]
+
         # ---- message_filters Subscribers + Approx sync ----
         self.pc_sub = message_filters.Subscriber(self, PointCloud2, self.pc_topic)
         self.odom_sub = message_filters.Subscriber(self, Odometry, self.odom_topic)
 
         # ROS2 message_filters ApproximateTimeSynchronizer signature differs from ROS1; no "reset" arg.
         self.ts = message_filters.ApproximateTimeSynchronizer(
-            [self.pc_sub, self.odom_sub], queue_size=10, slop=0.1, allow_headerless=False
+            [self.pc_sub, self.odom_sub], queue_size=10, slop=0.5, allow_headerless=False
         )
         self.ts.registerCallback(self.synced_callback)
 
@@ -190,6 +199,7 @@ class PointCloudTransformer(Node):
         return float(self.get_clock().now().nanoseconds) * 1e-9
 
     def synced_callback(self, point_cloud_msg: PointCloud2, odom_msg: Odometry):
+        self.get_logger().info(f"Received point cloud frame.")
         self.input_timestamps.append(self.now_sec())
         try:
             self.msg_queue.put_nowait((point_cloud_msg, odom_msg))
@@ -282,8 +292,12 @@ class PointCloudTransformer(Node):
 
         # Step 1: PointCloud2 -> xyz (CuPy)
         pc_to_points_start_time = time.time()
-        xyz_list = list(pc2.read_points(point_cloud_msg, skip_nans=True, field_names=("x", "y", "z")))
-        xyz_cp = cp.asarray(xyz_list, dtype=cp.float32)
+        # Robust for mixed datatypes/point_step: use read_points() and build Nx3 float32
+        pts_iter = pc2.read_points(point_cloud_msg, field_names=("x", "y", "z"), skip_nans=True)
+        # Flatten tuples into a 1D float32 stream, then reshape to (N,3)
+        flat = np.fromiter(itertools.chain.from_iterable(pts_iter), dtype=np.float32)
+        xyz_np = flat.reshape((-1, 3))
+        xyz_cp = cp.asarray(xyz_np, dtype=cp.float32)
         pc_to_points_duration_ms = (time.time() - pc_to_points_start_time) * 1000.0
 
         # Step 2: Transform points (CuPy)
@@ -301,7 +315,7 @@ class PointCloudTransformer(Node):
         # Step 4: Publish transformed cloud (optional)
         pc_create_start_time = time.time()
         if self.publish_subtopics:
-            transformed_msg = create_cloud_from_np(point_cloud_msg.header, point_cloud_msg.fields, transformed_points)
+            transformed_msg = create_cloud_from_np(point_cloud_msg.header, self.xyz_fields, transformed_points)
             transformed_msg.header.stamp = self.get_clock().now().to_msg()
             self.point_cloud_pub.publish(transformed_msg)
         pc_create_duration_ms = (time.time() - pc_create_start_time) * 1000.0
@@ -314,7 +328,7 @@ class PointCloudTransformer(Node):
         cumulative_points_create_cloud_start_time = time.time()
         if self.publish_subtopics:
             cumulative_msg = create_cloud_from_np(
-                point_cloud_msg.header, point_cloud_msg.fields, points_cumulative_transformed
+                point_cloud_msg.header, self.xyz_fields, points_cumulative_transformed
             )
             cumulative_msg.header.stamp = self.get_clock().now().to_msg()
             self.cumulative_cloud_pub.publish(cumulative_msg)
@@ -334,9 +348,7 @@ class PointCloudTransformer(Node):
         )
 
         cum_origin_create_cloud_start_time = time.time()
-        cumulative_origin_msg = create_cloud_from_np(
-            point_cloud_msg.header, point_cloud_msg.fields, points_cumulative_origin
-        )
+        cumulative_origin_msg = create_cloud_from_np(point_cloud_msg.header, self.xyz_fields, points_cumulative_origin)
         cum_origin_points_create_cloud_duration_ms = (time.time() - cum_origin_create_cloud_start_time) * 1000.0
 
         cumulative_origin_msg.header.stamp = self.get_clock().now().to_msg()
