@@ -2,23 +2,21 @@
 # ROS2 Humble port of the ROS1 "sf" node
 
 import csv
-import itertools
-import logging
-import os
-import time
-from datetime import datetime
-
 import cupy as cp
 import cupyx.scipy.ndimage
 import cv2
+import itertools
+import logging
 import message_filters
 import numpy as np
+import os
 import rclpy
+import time
 from cv_bridge import CvBridge
+from datetime import datetime
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField
-
 
 # ----------------------------
 # Helpers / constants
@@ -76,8 +74,8 @@ def cart_to_sph_pts(pts):
     pts = cp.asarray(pts)
 
     x, y, z = pts[:, 0], pts[:, 1], pts[:, 2]
-    r = cp.sqrt(x**2 + y**2 + z**2)
-    theta = cp.arctan(z / cp.sqrt(x**2 + y**2))
+    r = cp.sqrt(x ** 2 + y ** 2 + z ** 2)
+    theta = cp.arctan(z / cp.sqrt(x ** 2 + y ** 2))
     phi = cp.arctan(y / x)
 
     return cp.column_stack((r, cp.degrees(theta), cp.degrees(phi)))
@@ -147,7 +145,7 @@ class LPFCache:
         x = cp.arange(cols) - ccol
         Y, X = cp.meshgrid(y, x, indexing="ij")
         D2 = (Y / crow) ** 2 + (X / ccol) ** 2
-        H = cp.exp(-D2 / (2 * sigma**2))
+        H = cp.exp(-D2 / (2 * sigma ** 2))
         return H.astype(cp.float32)
 
     def lpf(self, img, filter_type: str, ncutoff: float, butter_order: int, logger):
@@ -274,11 +272,11 @@ class SensorFusionNode(Node):
         super().__init__("sf")
 
         # ---- Params (topics) ----
-        self.declare_parameter("zed_depth_topic", "/zed2i/zed_node/depth/depth_registered")
-        self.declare_parameter("zed_camera_info_topic", "/zed2i/zed_node/depth/camera_info")
-        self.declare_parameter("zed_rgb_topic", "/zed2i/zed_node/left/image_rect_color")
+        self.declare_parameter("zed_depth_topic", "/zed/zed_node/depth/depth_registered")
+        self.declare_parameter("zed_camera_info_topic", "/zed/zed_node/depth/camera_info")
+        self.declare_parameter("zed_rgb_topic", "/zed/zed_node/left/image_rect_color")
         self.declare_parameter("vlp_topic", "/cumulative_origin_point_cloud")
-        self.declare_parameter("odom_topic", "/jackal_velocity_controller/odom")
+        self.declare_parameter("odom_topic", "/aft_mapped_to_init")
 
         self.declare_parameter("vlp_depth_topic", "/islam/vlp_depth")
         self.declare_parameter("pg_depth_topic", "/islam/pg_depth")
@@ -444,10 +442,15 @@ class SensorFusionNode(Node):
             f"{self.ODOM_TOPIC}\n"
         )
 
-        self.ats = message_filters.ApproximateTimeSynchronizer(
-            [self.depth_sub, self.vlp_sub, self.rgb_sub, self.cam_info_sub, self.odom_sub],
-            queue_size=10,
-            slop=0.1,
+        self.ats = message_filters.ApproximateTimeSynchronizer([
+            self.depth_sub,
+            self.vlp_sub,
+            self.rgb_sub,
+            self.cam_info_sub,
+            # self.odom_sub
+        ],
+            queue_size=100,
+            slop=100.0,
             allow_headerless=False,
         )
         self.ats.registerCallback(self.synchronized_callback)
@@ -480,7 +483,7 @@ class SensorFusionNode(Node):
         vlp_pc_msg: PointCloud2,
         pg_rgb_msg: Image,
         pg_camera_info_msg: CameraInfo,
-        pg_odom_msg: Odometry,
+        # pg_odom_msg: Odometry,
     ):
         self.get_logger().info("synchronized_callback")
 
@@ -595,8 +598,8 @@ class SensorFusionNode(Node):
 
         h, w = pg_depth_cropped.shape
         pg_depth_img = zed_depth_original.copy()
-        region = pg_depth_img[t : t + h, l : l + w]
-        pg_depth_img[t : t + h, l : l + w] = cp.where(cp.isnan(pg_depth_cropped), region, pg_depth_cropped)
+        region = pg_depth_img[t: t + h, l: l + w]
+        pg_depth_img[t: t + h, l: l + w] = cp.where(cp.isnan(pg_depth_cropped), region, pg_depth_cropped)
 
         fusion_time_ms = (time.time() - fusion_start_time) * 1000.0
 
@@ -660,9 +663,9 @@ class SensorFusionNode(Node):
         if self.PUBLISH_AUX:
             pg_rgb_msg.header.stamp = zed_img_msg.header.stamp
             pg_camera_info_msg.header.stamp = zed_img_msg.header.stamp
-            pg_odom_msg.header.stamp = zed_img_msg.header.stamp
+            # pg_odom_msg.header.stamp = zed_img_msg.header.stamp
             self.pg_camera_info_p.publish(pg_camera_info_msg)
-            self.pg_odom_p.publish(pg_odom_msg)
+            # self.pg_odom_p.publish(pg_odom_msg)
             self.get_logger().info("pg_odom published")
 
         total_processing_time_ms = (time.time() - total_start_time) * 1000.0
@@ -696,7 +699,8 @@ class SensorFusionNode(Node):
 
         # periodic report
         now = time.time()
-        if self.frame_counter >= self.report_interval_frames or (now - self.last_report_time) >= self.report_interval_seconds:
+        if self.frame_counter >= self.report_interval_frames or (
+                now - self.last_report_time) >= self.report_interval_seconds:
             if self.processing_times:
                 avg_fusion = sum(self.processing_times) / len(self.processing_times)
                 self.get_logger().info(
