@@ -304,9 +304,9 @@ class SensorFusionNode(Node):
         self.declare_parameter("butterworth_order", 3)
 
         # ---- Params (hardware specs) ----
-        self.declare_parameter("zed_h_angle", 102.0)
-        self.declare_parameter("zed_v_angle", 56.0)
-        self.declare_parameter("zed_max", 20.0)
+        self.declare_parameter("zed_h_angle", 110.0)
+        self.declare_parameter("zed_v_angle", 70.0)
+        self.declare_parameter("zed_max", 50.0)
         self.declare_parameter("zed_min", 0.0)
 
         self.declare_parameter("lidar_v", 16)
@@ -580,8 +580,17 @@ class SensorFusionNode(Node):
         vlp_depth_cropped[cp.abs(zed_depth_cropped - vlp_depth_cropped) > self.ZED_VLP_DIFF_MAX] = cp.nan
 
         # PG (your ROS1 currently bypassed PG by copying vlp_depth; keep same behavior)
-        # pg_depth_cropped = pg(zed_depth_cropped.copy(), vlp_depth_cropped.copy(), ...)
-        pg_depth_cropped = vlp_depth_cropped.copy()
+        pg_depth_cropped = pg(
+            zed_depth_cropped.copy(),
+            vlp_depth_cropped.copy(),
+            self.lpf_cache,
+            self.FILTER_TYPE,
+            float(self.CURRENT_NCUTOFF),
+            int(self.BUTTERWORTH_ORDER),
+            int(self.CURRENT_THRESHOLD),
+            self.get_logger(),
+        )
+        # pg_depth_cropped = vlp_depth_cropped.copy()
 
         zed_depth = cp.pad(
             zed_depth_cropped,
@@ -615,7 +624,12 @@ class SensorFusionNode(Node):
         pts_to_pc_time_ms = 0.0
 
         # In ROS2, CameraInfo fields are lower-case in Python: k, p, etc.
-        if pg_camera_info_msg.k and pg_camera_info_msg.p and self.PUBLISH_PC:
+        # CameraInfo.k and .p are fixed-length arrays; don't use them directly in boolean context.
+        k = np.asarray(pg_camera_info_msg.k, dtype=np.float64)
+        p = np.asarray(pg_camera_info_msg.p, dtype=np.float64)
+        cam_ok = (k.size == 9) and (p.size == 12) and (np.any(k != 0.0)) and (np.any(p != 0.0))
+
+        if cam_ok and self.PUBLISH_PC:
             t0 = time.time()
             fused_cart_pts = depth_to_cart_pts(pg_depth_img, camera_info_msg=pg_camera_info_msg)
             zed_cart_pts = depth_to_cart_pts(zed_depth, camera_info_msg=pg_camera_info_msg)
@@ -638,9 +652,8 @@ class SensorFusionNode(Node):
             self.zed_original_pc_p.publish(zed_original_pc_msg)
             self.vlp_debug_pc_p.publish(vlp_pc_dbg_msg)
             self.get_logger().info("publish_pg")
-        elif (not pg_camera_info_msg.k) or (not pg_camera_info_msg.p):
-            self.get_logger().warning("CameraInfo invalid/not ready; skipping fused point cloud publication.")
-
+        elif self.PUBLISH_PC and (not cam_ok):
+            self.get_logger().warning("CameraInfo invalid/not ready (k/p all zeros); skipping fused point cloud publication.")
         zed_pc_time_ms = (time.time() - zed_pc_start_time) * 1000.0
 
         # %% Publish VLP depth image (optional)
