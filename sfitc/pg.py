@@ -298,7 +298,7 @@ class SensorFusionNode(Node):
         self.declare_parameter("mortal_rows_bottom", 320)
         self.declare_parameter("mortal_columns_left", 70)
         self.declare_parameter("mortal_columns_right", 10)
-        self.declare_parameter("zed_vlp_diff_max", 50.0)
+        self.declare_parameter("zed_vlp_diff_max", 500.0)
 
         self.declare_parameter("filter_type", "gaussian")  # gaussian|butterworth|brick_wall
         self.declare_parameter("butterworth_order", 3)
@@ -311,12 +311,12 @@ class SensorFusionNode(Node):
 
         self.declare_parameter("lidar_v", 16)
         self.declare_parameter("lidar_angle", 30.2)
-        self.declare_parameter("lidar_max", 40.0)
+        self.declare_parameter("lidar_max", 100.0)
         self.declare_parameter("lidar_min", 0.5)
 
         # ---- Debug toggles (ROS1 globals -> ROS2 params) ----
         self.declare_parameter("synthetic_data", False)
-        self.declare_parameter("publish_pc", False)
+        self.declare_parameter("publish_pc", True)
         self.declare_parameter("publish_aux", False)
 
         # ---- Read params ----
@@ -376,26 +376,34 @@ class SensorFusionNode(Node):
         self.csv_writer = csv.writer(self.log_file)
         self.csv_writer.writerow(
             [
-                "Timestamp",
-                "FrameNumber",
-                "FusionTime_ms",
-                "VLP_PreprocTime_ms",
-                "msg_to_pts_time_ms",
-                "cart_to_pts_time_ms",
-                "remap_time_ms",
-                "vlp_mean_time_ms",
-                "scatter_time_ms",
-                "VLP_FilteredTime_ms",
-                "sph_to_cart_pts_time_ms",
-                "filtered_publish_time_ms",
-                "ZED_PC_Time_ms",
-                "depth_to_cart_time_ms",
-                "pts_to_pc_time_ms",
-                "cp_to_np_time_ms",
-                "pc_to_msg_time_ms",
-                "TotalCallbackTime_ms",
-                "ncutoff",
-                "threshold",
+                "Timestamp",  # time.time(),
+                "FrameNumber",  # self.frame_counter,
+
+                "fusion_time_ms",  # fusion_time_ms,
+                "zed_preproc_time_ms",  # zed_preproc_time_ms,
+                "vlp_preproc_time_ms",  # vlp_preproc_time_ms,
+                "msg_to_pts_time_ms",  # msg_to_pts_time_ms,
+                "cart_to_pts_time_ms",  # cart_to_pts_time_ms,
+                "remap_time_ms",  # remap_time_ms,
+                "vlp_mean_time_ms",  # float(vlp_mean.get()) if hasattr(vlp_mean, "get") else float(vlp_mean),
+                "scatter_time_ms",  # scatter_time_ms,
+
+                "vlp_filtered_time_ms",  # vlp_filtered_time_ms,
+                "sph_to_cart_pts_time_ms",  # sph_to_cart_pts_time_ms,
+                "filtered_publish_time_ms",  # filtered_publish_time_ms,
+
+                "zed_pc_time_ms",  # zed_pc_time_ms,
+                "depth_to_cart_time_ms",  # depth_to_cart_time_ms,
+                "pts_to_pc_time_ms",  # pts_to_pc_time_ms,
+                "cp_to_np_time_ms",  # self.cp_to_np_time_ms,
+                "pc_to_msg_time_ms",  # self.pc_to_msg_time_ms,
+                "vlp_depth_time_ms",  # vlp_depth_time_ms,
+                "pg_depth_time_ms",  # pg_depth_time_ms,
+                "aux_time_ms",  # aux_time_ms,
+
+                "TotalCallbackTime_ms",  # total_processing_time_ms,
+                "ncutoff",  # self.CURRENT_NCUTOFF,
+                "threshold",  # self.CURRENT_THRESHOLD,
             ]
         )
 
@@ -530,16 +538,16 @@ class SensorFusionNode(Node):
 
         if len(vlp_sph_pts) > 0 and self.PUBLISH_PC:
             sph_to_cart_pts_start_time = time.time()
-            vlp_filtered_cart_pts = sph_to_cart_pts(vlp_sph_pts.copy())
-            vlp_filtered_cart_pts_np = vlp_filtered_cart_pts.get()
+            # vlp_filtered_cart_pts = sph_to_cart_pts(vlp_sph_pts.copy())
+            # vlp_filtered_cart_pts_np = vlp_filtered_cart_pts.get()
             sph_to_cart_pts_time_ms = (time.time() - sph_to_cart_pts_start_time) * 1000.0
 
             filtered_publish_start_time = time.time()
-            header = vlp_pc_msg.header
-            header.frame_id = self.zed_depth_frame_id
-
-            vlp_filtered_pc_msg = create_cloud_from_np(header, self.xyz_fields, vlp_filtered_cart_pts_np)
-            self.vlp_filtered_pc_p.publish(vlp_filtered_pc_msg)
+            # header = vlp_pc_msg.header
+            # header.frame_id = self.zed_depth_frame_id
+            #
+            # vlp_filtered_pc_msg = create_cloud_from_np(header, self.xyz_fields, vlp_filtered_cart_pts_np)
+            # self.vlp_filtered_pc_p.publish(vlp_filtered_pc_msg)
             filtered_publish_time_ms = (time.time() - filtered_publish_start_time) * 1000.0
 
             self.get_logger().debug("vlp_filtered_pc_p.publish")
@@ -547,6 +555,8 @@ class SensorFusionNode(Node):
         vlp_filtered_time_ms = (time.time() - vlp_filtered_start_time) * 1000.0
 
         # %% ZED Preproc
+        zed_preproc_start_time = time.time()
+
         zed_depth_original = cp.array(self.bridge.imgmsg_to_cv2(zed_img_msg, desired_encoding="32FC1"))
 
         # synthetic
@@ -567,6 +577,8 @@ class SensorFusionNode(Node):
         zed_depth = zed_depth_original.copy()
         zed_depth = inpaint_depth_cupy_nanaware(zed_depth)
         zed_depth[~cp.isfinite(zed_depth)] = self.ZED_MAX
+
+        zed_preproc_time_ms = (time.time() - zed_preproc_start_time) * 1000.0
 
         # %% Sensor Fusion
         fusion_start_time = time.time()
@@ -610,13 +622,13 @@ class SensorFusionNode(Node):
         region = pg_depth_img[t: t + h, l: l + w]
         pg_depth_img[t: t + h, l: l + w] = cp.where(cp.isnan(pg_depth_cropped), region, pg_depth_cropped)
 
+        # remove filled pixels
+        pg_depth_img[filled_mask] = cp.nan
+
         fusion_time_ms = (time.time() - fusion_start_time) * 1000.0
 
         self.processing_times.append(fusion_time_ms)
         self.frame_counter += 1
-
-        # remove filled pixels
-        pg_depth_img[filled_mask] = cp.nan
 
         # %% Convert fused depth to point clouds (optional)
         zed_pc_start_time = time.time()
@@ -631,45 +643,50 @@ class SensorFusionNode(Node):
 
         if cam_ok and self.PUBLISH_PC:
             t0 = time.time()
-            fused_cart_pts = depth_to_cart_pts(pg_depth_img, camera_info_msg=pg_camera_info_msg)
-            zed_cart_pts = depth_to_cart_pts(zed_depth, camera_info_msg=pg_camera_info_msg)
-            zed_original_cart_pts = depth_to_cart_pts(zed_depth_original, camera_info_msg=pg_camera_info_msg)
-            vlp_cart_pts = depth_to_cart_pts(vlp_depth, camera_info_msg=pg_camera_info_msg)
+            # fused_cart_pts = depth_to_cart_pts(pg_depth_img, camera_info_msg=pg_camera_info_msg)
+            # zed_cart_pts = depth_to_cart_pts(zed_depth, camera_info_msg=pg_camera_info_msg)
+            # zed_original_cart_pts = depth_to_cart_pts(zed_depth_original, camera_info_msg=pg_camera_info_msg)
+            # vlp_cart_pts = depth_to_cart_pts(vlp_depth, camera_info_msg=pg_camera_info_msg)
             depth_to_cart_time_ms = (time.time() - t0) * 1000.0
 
             header = zed_img_msg.header
             header.frame_id = self.zed_depth_frame_id
 
             t1 = time.time()
-            pg_fused_pc_msg = self.cart_pts_to_pc_msg(fused_cart_pts, header)
-            zed_pc_msg = self.cart_pts_to_pc_msg(zed_cart_pts, header)
-            zed_original_pc_msg = self.cart_pts_to_pc_msg(zed_original_cart_pts, header)
-            vlp_pc_dbg_msg = self.cart_pts_to_pc_msg(vlp_cart_pts, header)
+            # pg_fused_pc_msg = self.cart_pts_to_pc_msg(fused_cart_pts, header)
+            # zed_pc_msg = self.cart_pts_to_pc_msg(zed_cart_pts, header)
+            # zed_original_pc_msg = self.cart_pts_to_pc_msg(zed_original_cart_pts, header)
+            # vlp_pc_dbg_msg = self.cart_pts_to_pc_msg(vlp_cart_pts, header)
             pts_to_pc_time_ms = (time.time() - t1) * 1000.0
 
-            self.pg_fused_pc_p.publish(pg_fused_pc_msg)
-            self.zed_pc_p.publish(zed_pc_msg)
-            self.zed_original_pc_p.publish(zed_original_pc_msg)
-            self.vlp_debug_pc_p.publish(vlp_pc_dbg_msg)
+            # self.pg_fused_pc_p.publish(pg_fused_pc_msg)
+            # self.zed_pc_p.publish(zed_pc_msg)
+            # self.zed_original_pc_p.publish(zed_original_pc_msg)
+            # self.vlp_debug_pc_p.publish(vlp_pc_dbg_msg)
+            self.vlp_debug_pc_p.publish(vlp_pc_msg)
             self.get_logger().info("publish_pg")
         elif self.PUBLISH_PC and (not cam_ok):
             self.get_logger().warning("CameraInfo invalid/not ready (k/p all zeros); skipping fused point cloud publication.")
+
         zed_pc_time_ms = (time.time() - zed_pc_start_time) * 1000.0
 
         # %% Publish VLP depth image (optional)
-        if self.PUBLISH_PC:
+        vlp_depth_start_time = time.time()
+        if self.PUBLISH_AUX:
             vlp_depth_msg = self.bridge.cv2_to_imgmsg(vlp_depth.get(), encoding="32FC1")
             vlp_depth_msg.header.stamp = zed_img_msg.header.stamp
             vlp_depth_msg.header.frame_id = self.zed_depth_frame_id
             self.vlp_depth_p.publish(vlp_depth_msg)
-
+        vlp_depth_time_ms = (time.time() - vlp_depth_start_time) * 1000.0
         # %% Publish PG depth image (always, like your ROS1)
+        pg_depth_start_time = time.time()
         pg_depth_msg = self.bridge.cv2_to_imgmsg(pg_depth_img.get(), encoding="32FC1")
         pg_depth_msg.header.stamp = self.get_clock().now().to_msg()
         pg_depth_msg.header.frame_id = self.zed_depth_frame_id
         self.pg_depth_p.publish(pg_depth_msg)
-
+        pg_depth_time_ms = (time.time() - pg_depth_start_time) * 1000.0
         # %% Publish aux info
+        aux_start_time = time.time()
         pg_rgb_msg.header.stamp = self.get_clock().now().to_msg()
         self.pg_rgb_p.publish(pg_rgb_msg)
 
@@ -680,6 +697,7 @@ class SensorFusionNode(Node):
             self.pg_camera_info_p.publish(pg_camera_info_msg)
             # self.pg_odom_p.publish(pg_odom_msg)
             self.get_logger().info("pg_odom published")
+        aux_time_ms = (time.time() - aux_start_time) * 1000.0
 
         total_processing_time_ms = (time.time() - total_start_time) * 1000.0
 
@@ -689,11 +707,12 @@ class SensorFusionNode(Node):
                 time.time(),
                 self.frame_counter,
                 fusion_time_ms,
+                zed_preproc_time_ms,
                 vlp_preproc_time_ms,
                 msg_to_pts_time_ms,
                 cart_to_pts_time_ms,
                 remap_time_ms,
-                float(vlp_mean.get()) if hasattr(vlp_mean, "get") else float(vlp_mean),
+                vlp_mean_time_ms,
                 scatter_time_ms,
                 vlp_filtered_time_ms,
                 sph_to_cart_pts_time_ms,
@@ -703,6 +722,9 @@ class SensorFusionNode(Node):
                 pts_to_pc_time_ms,
                 self.cp_to_np_time_ms,
                 self.pc_to_msg_time_ms,
+                vlp_depth_time_ms,
+                pg_depth_time_ms,
+                aux_time_ms,
                 total_processing_time_ms,
                 self.CURRENT_NCUTOFF,
                 self.CURRENT_THRESHOLD,

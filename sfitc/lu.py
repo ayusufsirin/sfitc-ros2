@@ -79,7 +79,7 @@ class PointCloudTransformer(Node):
         # ---- Params (ROS1 "~param" -> ROS2 node params) ----
         self.declare_parameter("pc_history_size", 10)
         self.declare_parameter("pc_topic", "/velodyne_points")
-        self.declare_parameter("odom_topic", "/aft_mapped_to_init")
+        self.declare_parameter("odom_topic", "/imu/odom")
         self.declare_parameter("publish_subtopics", False)
         self.declare_parameter("point_cloud_transformed", "/transformed_point_cloud")
         self.declare_parameter("point_cloud_cumulative", "/cumulative_point_cloud")
